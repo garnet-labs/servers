@@ -32,9 +32,13 @@ jobs:
         package: ${{ fromJson(needs.detect-packages.outputs.packages) }}
     name: Test ${{ matrix.package }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
+      - uses: garnet-org/action@e546567a72e4fede11ec39d6e9f75b539adef22c # main 2026-09-04
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 

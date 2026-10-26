@@ -1,20 +1,37 @@
+// The `gzip-file-as-resource` tool: fetches a file, gzips it, and returns the
+// result as an embedded resource or as a link to a resource the client can
+// read later.
+//
+// Where that later resource lives depends on the protocol era (#4852). For a
+// 2025-era client it is registered on the server instance serving the
+// client's connection or session (resources/session.ts), and lasts as long as
+// that does. The 2026-07-28 revision has no sessions, and on its HTTP path
+// each request gets a fresh instance, so for a 2026-07-28 client the resource
+// is stored under a URI with a server-minted id that every instance can serve
+// (resources/minted.ts), and expires after ten minutes.
+
 import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CallToolResult, Resource } from "@modelcontextprotocol/sdk/types.js";
+import {
+  McpServer,
+  CallToolResult,
+  Resource,
+} from "@modelcontextprotocol/server";
 import { gzipSync } from "node:zlib";
+import { mintBlobResource } from "../resources/minted.js";
 import {
   getSessionResourceURI,
   registerSessionResource,
 } from "../resources/session.js";
+import type { ServerContext } from "../server/context.js";
 
 // Maximum input file size - 10 MB default
 const GZIP_MAX_FETCH_SIZE = Number(
-  process.env.GZIP_MAX_FETCH_SIZE ?? String(10 * 1024 * 1024)
+  process.env.GZIP_MAX_FETCH_SIZE ?? String(10 * 1024 * 1024),
 );
 
 // Maximum fetch time - 30 seconds default.
 const GZIP_MAX_FETCH_TIME_MILLIS = Number(
-  process.env.GZIP_MAX_FETCH_TIME_MILLIS ?? String(30 * 1000)
+  process.env.GZIP_MAX_FETCH_TIME_MILLIS ?? String(30 * 1000),
 );
 
 // Comma-separated list of allowed domains. Empty means all domains are allowed.
@@ -25,18 +42,22 @@ const GZIP_ALLOWED_DOMAINS = (process.env.GZIP_ALLOWED_DOMAINS ?? "")
 
 // Tool input schema
 const GZipFileAsResourceSchema = z.object({
-  name: z.string().describe("Name of the output file").default("README.md.gz"),
+  name: z
+    .string()
+    .max(255)
+    .describe("Name of the output file (at most 255 characters)")
+    .default("README.md.gz"),
   data: z
     .url()
     .describe("URL or data URI of the file content to compress")
     .default(
-      "https://raw.githubusercontent.com/modelcontextprotocol/servers/refs/heads/main/README.md"
+      "https://raw.githubusercontent.com/modelcontextprotocol/servers/refs/heads/main/README.md",
     ),
   outputType: z
     .enum(["resourceLink", "resource"])
     .default("resourceLink")
     .describe(
-      "How the resulting gzipped file should be returned. 'resourceLink' returns a link to a resource that can be read later, 'resource' returns a full resource object."
+      "How the resulting gzipped file should be returned. 'resourceLink' returns a link to a resource that can be read later, 'resource' returns a full resource object.",
     ),
 });
 
@@ -45,7 +66,7 @@ const name = "gzip-file-as-resource";
 const config = {
   title: "GZip File as Resource Tool",
   description:
-    "Compresses a single file using gzip compression. Depending upon the selected output type, returns either the compressed data as a gzipped resource or a resource link, allowing it to be downloaded in a subsequent request during the current session.",
+    "Compresses a single file using gzip compression. Depending upon the selected output type, returns either the compressed data as a gzipped resource or a resource link, allowing it to be downloaded in a subsequent request: during the current session for a 2025-era client, or for ten minutes at a minted URI on protocol version 2026-07-28.",
   inputSchema: GZipFileAsResourceSchema,
   annotations: {
     readOnlyHint: false,
@@ -68,9 +89,13 @@ const config = {
  * If an unrecognized `outputType` is provided, the tool throws an error.
  *
  * @param {McpServer} server - The McpServer instance where the tool will be registered.
+ * @param {ServerContext} context - The protocol era the instance serves.
  * @throws {Error} Throws an error if an unknown output type is specified.
  */
-export const registerGZipFileAsResourceTool = (server: McpServer) => {
+export const registerGZipFileAsResourceTool = (
+  server: McpServer,
+  context: ServerContext,
+) => {
   server.registerTool(name, config, async (args): Promise<CallToolResult> => {
     const {
       name,
@@ -97,14 +122,6 @@ export const registerGZipFileAsResourceTool = (server: McpServer) => {
     const mimeType = "application/gzip";
     const resource = <Resource>{ uri, name, mimeType };
 
-    // Register resource, get resource link in return
-    const resourceLink = registerSessionResource(
-      server,
-      resource,
-      "blob",
-      blob
-    );
-
     // Return the resource or a resource link that can be used to access this resource later
     if (outputType === "resource") {
       return {
@@ -116,10 +133,16 @@ export const registerGZipFileAsResourceTool = (server: McpServer) => {
         ],
       };
     } else if (outputType === "resourceLink") {
+      // Make the resource readable later, where this era can reach it
+      const resourceLink =
+        context.era === "modern"
+          ? mintBlobResource(name, mimeType, blob)
+          : registerSessionResource(server, resource, "blob", blob);
       return {
         content: [resourceLink],
       };
     } else {
+      /* v8 ignore next -- unreachable: the input schema's enum admits only resource and resourceLink */
       throw new Error(`Unknown outputType: ${outputType}`);
     }
   });
@@ -142,7 +165,7 @@ function validateDataURI(dataUri: string): URL {
       url.protocol !== "data:"
     ) {
       throw new Error(
-        `Unsupported URL protocol for ${dataUri}. Only http, https, and data URLs are supported.`
+        `Unsupported URL protocol for ${dataUri}. Only http, https, and data URLs are supported.`,
       );
     }
     if (
@@ -161,7 +184,8 @@ function validateDataURI(dataUri: string): URL {
     throw new Error(
       `Error processing file ${dataUri}: ${
         error instanceof Error ? error.message : String(error)
-      }`
+      }`,
+      { cause: error },
     );
   }
   return url;
@@ -179,15 +203,15 @@ function validateDataURI(dataUri: string): URL {
  */
 async function fetchSafely(
   url: URL,
-  { maxBytes, timeoutMillis }: { maxBytes: number; timeoutMillis: number }
+  { maxBytes, timeoutMillis }: { maxBytes: number; timeoutMillis: number },
 ): Promise<ArrayBuffer> {
   const controller = new AbortController();
   const timeout = setTimeout(
     () =>
       controller.abort(
-        `Fetching ${url} took more than ${timeoutMillis} ms and was aborted.`
+        `Fetching ${url} took more than ${timeoutMillis} ms and was aborted.`,
       ),
-    timeoutMillis
+    timeoutMillis,
   );
 
   try {
@@ -204,7 +228,7 @@ async function fetchSafely(
       const contentLength = parseInt(contentLengthHeader, 10);
       if (contentLength > maxBytes) {
         throw new Error(
-          `Content-Length for ${url} exceeds max of ${maxBytes}: ${contentLength}`
+          `Content-Length for ${url} exceeds max of ${maxBytes}: ${contentLength}`,
         );
       }
     }
@@ -223,7 +247,14 @@ async function fetchSafely(
         totalSize += value.length;
 
         if (totalSize > maxBytes) {
-          reader.cancel();
+          // Not awaited: cancel() adopts the source's promise and may never
+          // settle, and we are about to throw anyway. Swallow its rejection so
+          // it cannot surface as an unhandled one; the thrown size error is
+          // the failure this path reports.
+          reader.cancel().catch(
+            /* v8 ignore next -- only runs if cancelling the source fails, which nothing here can provoke */
+            () => {},
+          );
           throw new Error(`Response from ${url} exceeds ${maxBytes} bytes`);
         }
 

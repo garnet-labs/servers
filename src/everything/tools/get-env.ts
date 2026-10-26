@@ -1,5 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, CallToolResult } from "@modelcontextprotocol/server";
 
 // Tool configuration
 const name = "get-env";
@@ -26,7 +25,7 @@ const config = {
  * @returns {void}
  */
 export const registerGetEnvTool = (server: McpServer) => {
-  server.registerTool(name, config, async (args): Promise<CallToolResult> => {
+  server.registerTool(name, config, async (): Promise<CallToolResult> => {
     return {
       content: [
         {

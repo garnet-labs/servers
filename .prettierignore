@@ -5,3 +5,6 @@
 **/dist/
 **/coverage/
 **/node_modules/
+
+# Trusted fork-only recorder scripts are preserved byte-for-byte.
+.github/scripts/garnet-*.mjs

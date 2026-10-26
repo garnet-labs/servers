@@ -1,5 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, CallToolResult } from "@modelcontextprotocol/server";
 
 // A tiny encoded MCP logo image
 export const MCP_TINY_IMAGE =
@@ -31,7 +30,7 @@ const config = {
  * @param server - The McpServer instance where the tool will be registered.
  */
 export const registerGetTinyImageTool = (server: McpServer) => {
-  server.registerTool(name, config, async (args): Promise<CallToolResult> => {
+  server.registerTool(name, config, async (): Promise<CallToolResult> => {
     return {
       content: [
         {
